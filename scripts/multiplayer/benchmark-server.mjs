@@ -3,13 +3,14 @@ import { performance } from 'node:perf_hooks';
 import { RaceService } from '../../server/rooms.js';
 import { newDriver } from '../../src/multiplayer-physics.js';
 import { createTrack } from '../../src/track.js';
+import { packSnapshot } from '../../src/multiplayer-protocol.js';
 
 for (const roomCount of [1, 5, 10]) {
   let now = 100000, nextCode = 100000;
   let encoded = new WeakMap(), wireBytes = 0;
   const service = new RaceService({ now: () => now, random: () => String(nextCode++), send: (_, message) => {
     let bytes = encoded.get(message);
-    if (!bytes) { bytes = Buffer.byteLength(JSON.stringify(message)); encoded.set(message, bytes); }
+    if (!bytes) { bytes = Buffer.byteLength(JSON.stringify(message.type === 'snapshot' ? packSnapshot(message) : message)); encoded.set(message, bytes); }
     wireBytes += bytes;
   } });
   const tracks = new Map();

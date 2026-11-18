@@ -3,17 +3,22 @@ import { WebSocketServer } from 'ws';
 import { RaceService } from './rooms.js';
 import { createStatsStore } from './stats.js';
 import { clientAddress } from './client-address.js';
+import { packSnapshot, PROTOCOL } from '../src/multiplayer-protocol.js';
+import { SIMULATION_VERSION } from '../src/multiplayer-version.js';
 
 const port = Number(process.env.PORT), host = '0.0.0.0';
-if (!Number.isInteger(port) || port < Number(process.env.PORT_BASE) || port > Number(process.env.PORT_END) || !process.env.PORT_BASE || !process.env.PORT_END) throw new Error('PORT must be inside the assigned PORT_BASE–PORT_END range.');
+if (!Number.isInteger(port) || port < Number(process.env.PORT_BASE) || port > Number(process.env.PORT_END) || !process.env.PORT_BASE || !process.env.PORT_END) throw new Error('PORT must be inside the assigned port range.');
 const origins = new Set((process.env.MP_ORIGINS || 'http://127.0.0.1:5173,http://localhost:5173').split(','));
 const store = await createStatsStore();
 // A snapshot is identical for every driver; encode it once per broadcast.
 const encoded = new WeakMap();
 const send = (socket, value) => {
-  if (socket?.readyState !== 1 || socket.bufferedAmount >= 65536) return;
+  if (socket?.readyState !== 1) return;
+  // Never queue a stream of obsolete snapshots behind a congested socket.
+  if (value.type === 'snapshot' && socket.bufferedAmount > 2048) return;
+  if (socket.bufferedAmount >= 65536) { socket.close(1013, 'Connection congested'); return; }
   let payload = encoded.get(value);
-  if (!payload) { payload = JSON.stringify(value); encoded.set(value, payload); }
+  if (!payload) { payload = JSON.stringify(value.type === 'snapshot' ? packSnapshot(value) : value); encoded.set(value, payload); }
   socket.send(payload);
 };
 const service = new RaceService({ send, readStats: store.read, saveStats: store.save });
@@ -21,7 +26,7 @@ const http = createServer((request, response) => {
   // The hosting reverse proxy owns HTTP CORS. WebSocket origins are still
   // checked explicitly below, independently of HTTP CORS response headers.
   response.setHeader('Cache-Control', 'no-store'); response.setHeader('Content-Type', 'application/json');
-  if (request.url === '/health') response.end(JSON.stringify({ ok: true, protocol: 1, rooms: service.rooms.size }));
+  if (request.url === '/health') response.end(JSON.stringify({ ok: true, protocol: PROTOCOL, simulation: SIMULATION_VERSION, rooms: service.rooms.size }));
   else { response.statusCode = 404; response.end(JSON.stringify({ error: 'Not found' })); }
 });
 const sockets = new WebSocketServer({ noServer: true, maxPayload: 4096, perMessageDeflate: false });
@@ -52,6 +57,10 @@ sockets.on('connection', socket => {
       const data = JSON.parse(bytes.toString()); if (!data || typeof data !== 'object') return;
       if (!player) {
         if (data.type !== 'hello' || identifying) return;
+        if (data.protocol !== PROTOCOL || data.simulation !== SIMULATION_VERSION) {
+          send(socket, { type: 'error', message: 'The game has been updated. Refresh the page to reconnect.' });
+          socket.close(1008, 'Refresh required'); return;
+        }
         identifying = true; player = await service.identify(socket, data.token); clearTimeout(authTimeout); return;
       }
       if (player.connection !== socket) { socket.close(1008, 'Replaced'); return; }

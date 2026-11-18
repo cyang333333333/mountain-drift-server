@@ -1,8 +1,11 @@
 import { randomBytes, createHash } from 'node:crypto';
 import { createTrack } from '../src/track.js';
 import { CARS, TRACKS, getTrack } from '../src/catalog.js';
-import { newDriver, stepDriver, resolveContact, sanitizeInput, EMPTY_INPUT, FIXED_DT, contact } from '../src/multiplayer-physics.js';
+import { newDriver, stepRaceDrivers, sanitizeInput, EMPTY_INPUT, FIXED_DT } from '../src/multiplayer-physics.js';
+import { GRID_LATERALS, roadRecordKey } from '../src/road.js';
 import { snapshotState } from './snapshot-state.js';
+import { TICK_MS, PROTOCOL } from '../src/multiplayer-protocol.js';
+import { SIMULATION_VERSION } from '../src/multiplayer-version.js';
 
 export const EMOTES = ['Good luck!', 'Nice drift!', 'Clean racing!', 'Sorry!', 'Great race!', 'One more?'];
 const tracks = new Map();
@@ -30,7 +33,8 @@ export class RaceService {
     }
     player.connection = connection; player.disconnectedAt = null;
     if (player.state) { player.state.ghostUntil = this.now() + 3000; player.input = EMPTY_INPUT; }
-    this.send(connection, { type: 'welcome', id, token, stats: player.stats });
+    player.inputQueue = []; player.input = EMPTY_INPUT; player.seq = player.appliedSeq ?? -1;
+    this.send(connection, { type: 'welcome', id, token, stats: player.stats, protocol: PROTOCOL, simulation: SIMULATION_VERSION, serverTime: this.now() });
     if (player.room) { this.broadcast(player.room); this.send(connection, this.snapshot(player.room)); }
     return player;
   }
@@ -111,10 +115,16 @@ export class RaceService {
       const people = this.listPlayers(room);
       if (room.phase !== 'lobby' || people.length < 2 || !people.every(p => p.ready && p.connection)) throw new Error('At least two connected drivers must be ready.');
       room.phase = 'preparing'; room.raceId = randomBytes(12).toString('hex'); room.results = []; room.finishDeadline = null; room.preparingAt = now;
-      people.forEach((p, i) => { p.state = newDriver(p.carId, i); p.loaded = false; p.seq = -1; p.appliedSeq = -1; p.input = EMPTY_INPUT; }); this.broadcast(room);
+      room.tick = 0; room.timeline = 0;
+      people.forEach((p, i) => { p.state = newDriver(p.carId, i); p.loaded = false; p.seq = -1; p.appliedSeq = -1; p.input = EMPTY_INPUT; p.inputQueue = []; }); this.broadcast(room);
     } else if (data.type === 'input') {
       if (!['countdown', 'racing'].includes(room.phase) || !Number.isSafeInteger(data.seq) || data.seq <= player.seq) return;
-      player.seq = data.seq; player.lastInput = now; player.input = sanitizeInput(data.input);
+      if (data.raceId && data.raceId !== room.raceId) return;
+      const queue = player.inputQueue ||= [];
+      if (queue.length >= 120) return;
+      const tick = Math.min((room.tick || 0) + 120, Math.max((room.tick || 0) + 1, queue.at(-1)?.tick || 0, Number.isSafeInteger(data.tick) ? data.tick : (room.tick || 0) + 1));
+      player.seq = data.seq; player.lastInput = now;
+      queue.push({ tick, seq: data.seq, input: sanitizeInput(data.input) });
     } else if (data.type === 'respawn') {
       if (room.phase === 'racing' && !player.state.finished && now - player.lastRespawn > 5000) { player.lastRespawn = now; this.respawn(player, room, now); }
     } else if (data.type === 'chat') {
@@ -130,7 +140,7 @@ export class RaceService {
   }
   respawn(player, room, now) {
     const s = player.state, track = trackFor(room.settings.trackId);
-    s.distance = Math.max(0, s.checkpoint * track.length / 12); s.lateral = player.id.charCodeAt(0) % 2 ? 3 : -3;
+    s.distance = Math.max(0, s.checkpoint * track.length / 12); s.lateral = GRID_LATERALS[this.listPlayers(room).indexOf(player) % GRID_LATERALS.length];
     s.heading = 0; s.yaw = 0; s.pushX = 0; s.pushZ = 0; s.speed = 0; s.stuck = 0; s.ghostUntil = now + 3000; s.respawnAt = now; s.hitSerial++;
   }
   progress(player, room, from, now, dt) {
@@ -168,29 +178,24 @@ export class RaceService {
       // Bound catch-up to avoid a spiral after a server stall; pause race time rather than awarding unplayed distance.
       if (now - room.simTime > 250) {
         const lost = now - room.simTime - 250; room.startAt += lost; if (room.finishDeadline) room.finishDeadline += lost; room.simTime += lost;
+        room.timeline = (room.timeline || 0) + 1;
+        for (const p of people) p.inputQueue = [];
       }
-      // Never make solid cars overlap as start/respawn protection expires.
-      for (const p of people) if (p.state?.ghostUntil > 0 && p.state.ghostUntil <= now) {
-        if (room.settings.collisions && people.some(other => other !== p && other.state && !other.state.finished && contact(p.state, other.state, track.length))) p.state.ghostUntil = now + 200;
-        else p.state.ghostUntil = 0;
-      }
-      while (room.simTime + FIXED_DT * 1000 <= now) {
-        room.simTime += FIXED_DT * 1000;
+      while (room.startAt + ((room.tick || 0) + 1) * TICK_MS <= now + .00001) {
+        room.tick = (room.tick || 0) + 1;
+        room.simTime = room.startAt + room.tick * TICK_MS;
         const before = new Map();
         for (const p of people) {
           if (!p.state || p.state.finished) continue;
-          before.set(p.id, p.state.distance);
-          stepDriver(p.state, p.connection && now - p.lastInput < 500 ? p.input : EMPTY_INPUT, track);
-          p.appliedSeq = p.seq;
-        }
-        if (room.settings.collisions) {
-          for (let i = 0; i < people.length; i++) for (let j = i + 1; j < people.length; j++) {
-            const a = people[i].state, b = people[j].state;
-            if (!a || !b || a.finished || b.finished || a.ghostUntil > room.simTime || b.ghostUntil > room.simTime) continue;
-            const force = resolveContact(a, b, track.length);
-            if (force > 2) room.events.push({ id: `${room.raceId}:${Math.round(room.simTime)}:${i}:${j}`, a: people[i].id, b: people[j].id, force: Math.min(1, force / 22), distance: a.distance, lateral: a.lateral });
+          while (p.inputQueue?.length && p.inputQueue[0].tick <= room.tick) {
+            const command = p.inputQueue.shift(); p.input = command.input; p.appliedSeq = command.seq;
           }
+          before.set(p.id, p.state.distance);
         }
+        stepRaceDrivers(people.map(p => ({ state: p.state, input: p.connection && now - p.lastInput < 500 ? p.input : EMPTY_INPUT })), track, room.simTime, room.settings.collisions, (i,j,force) => {
+          const a = people[i].state;
+          room.events.push({ id: `${room.raceId}:${room.tick}:${i}:${j}`, a: people[i].id, b: people[j].id, force: Math.min(1, force / 22), distance: a.distance, lateral: a.lateral });
+        });
         for (const p of people) if (before.has(p.id) && !p.state.finished) this.progress(p, room, before.get(p.id), room.simTime, FIXED_DT);
       }
       if (people.length && (people.every(p => p.state?.finished || !p.connection) || (room.finishDeadline && now >= room.finishDeadline))) this.finish(room);
@@ -198,8 +203,8 @@ export class RaceService {
     for (const [id, p] of this.people) if (!p.connection && !p.room && now - (p.disconnectedAt || p.joined) > 60000) this.people.delete(id);
   }
   snapshot(room) {
-    return { type: 'snapshot', serverTime: this.now(), raceId: room.raceId, phase: room.phase, startAt: room.startAt, finishDeadline: room.finishDeadline,
-      players: this.listPlayers(room).filter(p => p.state).map(p => ({ id: p.id, seq: room.phase === 'countdown' ? p.seq : (p.appliedSeq ?? -1), state: snapshotState(p.state) })), events: room.events.slice(-30) };
+    return { type: 'snapshot', serverTime: room.simTime ?? this.now(), sentAt: this.now(), tick: room.tick || 0, timeline: room.timeline || 0, collisions: room.settings.collisions, raceId: room.raceId, phase: room.phase, startAt: room.startAt, finishDeadline: room.finishDeadline,
+      players: this.listPlayers(room).filter(p => p.state).map(p => ({ id: p.id, seq: p.appliedSeq ?? -1, input: p.connection && this.now() - p.lastInput < 500 ? p.input : EMPTY_INPUT, commands: (p.inputQueue || []).map(c => ({ ...c })), state: snapshotState(p.state) })), events: room.events.slice(-30) };
   }
   snapshots() { for (const room of this.rooms.values()) if (['countdown', 'racing'].includes(room.phase)) { const snapshot = this.snapshot(room); for (const p of this.listPlayers(room)) if (p.connection) this.send(p.connection, snapshot); room.events = []; } }
   finish(room) {
@@ -208,7 +213,7 @@ export class RaceService {
     const people = this.listPlayers(room).sort((a, b) => (a.state.finishTime ?? Infinity) - (b.state.finishTime ?? Infinity) || b.state.validDistance - a.state.validDistance);
     room.results = people.map((p, index) => ({ id: p.id, nickname: p.nickname, carId: p.carId, place: index + 1, time: p.state.finishTime, bestLap: p.state.bestLap, laps: p.state.lapTimes.length, dnf: !p.state.finished }));
     for (let index = 0; index < people.length; index++) {
-      const p = people[index], s = p.stats, key = `${room.settings.trackId}:${room.settings.collisions ? 'contact' : 'ghost'}`;
+      const p = people[index], s = p.stats, key = `${roadRecordKey(room.settings.trackId)}:${room.settings.collisions ? 'contact' : 'ghost'}`;
       s.races++; if (p.state.finished && index === 0) s.wins++; if (p.state.finished && index < 3) s.podiums++;
       if (p.state.bestLap && (!s.bestLaps[key] || p.state.bestLap < s.bestLaps[key])) s.bestLaps[key] = p.state.bestLap;
       const job = Promise.resolve(this.saveStats(p.id, s, room.raceId)).then(() => { if (p.connection) this.send(p.connection, { type: 'stats', stats: s }); }).catch(() => { if (p.connection) this.send(p.connection, { type: 'error', message: 'Race finished, but stats could not be saved. They will retry on the next race.' }); }).finally(() => this.finishJobs.delete(job)); this.finishJobs.add(job);

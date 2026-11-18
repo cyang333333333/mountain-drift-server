@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { getTrack } from './catalog.js';
+import { ROAD, VERGE_HALF } from './road.js';
 
 export function noise(x, z) { return Math.sin(x * .043) * Math.cos(z * .037) * 4 + Math.sin(x * .091 + z * .027) * 2 + Math.cos(x * .018 - z * .052) * 3; }
 
@@ -9,7 +10,8 @@ export function zoneWeight(progress, start, end) {
 
 export function createTrack(trackId = 'alpine-pass-v1') {
   const config = getTrack(trackId);
-  const curve = new THREE.CatmullRomCurve3(config.points.map(p => new THREE.Vector3(...p)), true, 'centripetal');
+  // Broader bend radii leave every inside lane open on the widened roads.
+  const curve = new THREE.CatmullRomCurve3(config.points.map(([x, y, z]) => new THREE.Vector3(x * ROAD.routeScale, y, z * ROAD.routeScale)), true, 'centripetal');
   curve.arcLengthDivisions = 2400;
   const length = curve.getLength(), count = 1200;
   const points = curve.getSpacedPoints(count);
@@ -27,8 +29,17 @@ export function createTrack(trackId = 'alpine-pass-v1') {
   }
   const coarse = points.filter((_, i) => i % 6 === 0);
   function nearest(x, z) {
-    let best = Infinity, height = 0, progress = 0;
-    for (let i = 0; i < coarse.length; i++) { const p = coarse[i], d = (x - p.x) ** 2 + (z - p.z) ** 2; if (d < best) { best = d; height = p.y; progress = i * 6 / count; } }
+    let best = Infinity, closest = 0;
+    for (let i = 0; i < coarse.length; i++) { const p = coarse[i], d = (x - p.x) ** 2 + (z - p.z) ** 2; if (d < best) { best = d; closest = i * 6; } }
+    best = Infinity;
+    let height = 0, progress = 0;
+    for (let j = closest - 7; j <= closest + 7; j++) {
+      const i = (j + count) % count, a = points[i], b = points[i + 1];
+      const dx = b.x - a.x, dz = b.z - a.z;
+      const f = THREE.MathUtils.clamp(((x - a.x) * dx + (z - a.z) * dz) / (dx * dx + dz * dz), 0, 1);
+      const d = (x - a.x - dx * f) ** 2 + (z - a.z - dz * f) ** 2;
+      if (d < best) { best = d; height = a.y + (b.y - a.y) * f; progress = (i + f) / count; }
+    }
     return { distance: Math.sqrt(best), height, progress };
   }
   function terrainHeight(x, z) {
@@ -37,16 +48,16 @@ export function createTrack(trackId = 'alpine-pass-v1') {
     const hills = config.theme === 'volcano'
       ? 5 + rough * 1.1 + Math.sin(x * .012 + .6) * Math.cos(z * .014) * 15
       : 19 + rough * 1.5 + Math.sin(x * .009) * Math.cos(z * .011) * 25;
-    const mix = THREE.MathUtils.smoothstep(near.distance, 9, 42);
-    let height = THREE.MathUtils.lerp(near.height - .6, hills, mix);
+    const mix = THREE.MathUtils.smoothstep(near.distance, VERGE_HALF + 7, VERGE_HALF + 45);
+    let height = THREE.MathUtils.lerp(near.height - 1.2, hills, mix);
     if (config.theme === 'volcano') {
       // Road clearance is measured against the entire circuit, including bends.
       const canyon = zoneWeight(near.progress, .015, .245);
-      height += canyon * 39 * THREE.MathUtils.smoothstep(near.distance, 12, 25) * (1 - THREE.MathUtils.smoothstep(near.distance, 50, 100));
+      height += canyon * 39 * THREE.MathUtils.smoothstep(near.distance, VERGE_HALF + 7, VERGE_HALF + 25) * (1 - THREE.MathUtils.smoothstep(near.distance, VERGE_HALF + 50, VERGE_HALF + 100));
       const crossing = zoneWeight(near.progress, .49, .735);
       height = THREE.MathUtils.lerp(height, -9 + rough * .3, crossing);
       const climb = zoneWeight(near.progress, .245, .455);
-      height += climb * 23 * THREE.MathUtils.smoothstep(near.distance, 14, 40) * (1 - THREE.MathUtils.smoothstep(near.distance, 65, 120));
+      height += climb * 23 * THREE.MathUtils.smoothstep(near.distance, VERGE_HALF + 9, VERGE_HALF + 40) * (1 - THREE.MathUtils.smoothstep(near.distance, VERGE_HALF + 65, VERGE_HALF + 120));
     }
     return height;
   }

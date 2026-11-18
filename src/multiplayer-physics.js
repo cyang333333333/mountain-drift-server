@@ -1,5 +1,6 @@
 import { getCar } from './catalog.js';
 import { clamp, damp } from './race.js';
+import { GRID_LATERALS, roadBodyLimit } from './road.js';
 
 export const FIXED_DT = 1 / 120;
 export const BODY = Object.freeze({
@@ -13,7 +14,7 @@ export function sanitizeInput(value) {
   return { throttle: value?.throttle === true, brake: value?.brake === true, steer: clamp(Number(value?.steer) || 0, -1, 1), drift: value?.drift === true, boost: value?.boost === true };
 }
 export function newDriver(carId, grid = 0) {
-  return { carId: getCar(carId).id, distance: -8 - Math.floor(grid / 2) * 16, lateral: grid % 2 ? 3.1 : -3.1,
+  return { carId: getCar(carId).id, distance: -8 - Math.floor(grid / GRID_LATERALS.length) * 20, lateral: GRID_LATERALS[grid % GRID_LATERALS.length],
     heading: 0, steer: 0, speed: 0, boost: 100, yaw: 0, pushX: 0, pushZ: 0, hit: 0, impact: 0, hitSerial: 0,
     drift: false, boosting: false, braking: false, lap: 1, finished: false, finishTime: null,
     checkpoint: 0, validDistance: 0, lapTimes: [], bestLap: null, lapStarted: null, ghostUntil: 0,
@@ -21,7 +22,7 @@ export function newDriver(carId, grid = 0) {
 }
 export function bodyLimit(s) {
   const b = BODY[s.carId];
-  return Math.max(.25, 7 - (Math.abs(Math.cos(s.heading)) * b.width + Math.abs(Math.sin(s.heading)) * b.length) / 2);
+  return roadBodyLimit(b.width, b.length, s.heading);
 }
 function impact(s, force) {
   s.impact = clamp(force / 22, 0, 1); s.hit = .5; s.hitSerial++;
@@ -95,6 +96,19 @@ export function resolveContact(a, b, length) {
   if (-relative > 1.5 && !a.hit) impact(a, -relative);
   if (-relative > 1.5 && !b.hit) impact(b, -relative);
   return -relative;
+}
+// Identical fixed-step ordering for authoritative racing and client prediction.
+export function stepRaceDrivers(players, track, time, collisions, onImpact) {
+  for (const p of players) if (p.state.ghostUntil > 0 && p.state.ghostUntil <= time) {
+    p.state.ghostUntil = collisions && players.some(other => other !== p && !other.state.finished && contact(p.state, other.state, track.length)) ? time + 200 : 0;
+  }
+  for (const p of players) if (!p.state.finished) stepDriver(p.state, p.input, track);
+  if (collisions) for (let i = 0; i < players.length; i++) for (let j = i + 1; j < players.length; j++) {
+    const a = players[i].state, b = players[j].state;
+    if (a.finished || b.finished || a.ghostUntil > time || b.ghostUntil > time) continue;
+    const force = resolveContact(a, b, track.length);
+    if (force > 2) onImpact?.(i, j, force);
+  }
 }
 export function stepDrivers(players, track, elapsed, time, collisions) {
   const count = Math.ceil(elapsed / FIXED_DT), dt = elapsed / count;

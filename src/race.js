@@ -1,6 +1,7 @@
 import { getCar } from './catalog.js';
+import { ROAD_HALF } from './road.js';
+export { ROAD_HALF } from './road.js';
 export const LAPS = 3;
-export const ROAD_HALF = 7;
 export const clamp = (x, min, max) => Math.max(min, Math.min(max, x));
 export const damp = (a, b, rate, dt) => a + (b - a) * (1 - Math.exp(-rate * dt));
 export function formatTime(seconds) {
