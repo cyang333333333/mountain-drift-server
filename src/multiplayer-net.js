@@ -21,6 +21,9 @@ export class MultiplayerConnection extends EventTarget {
     this.socket.onmessage = event => {
       const raw = JSON.parse(event.data), data = raw.type === 'snapshot' ? unpackSnapshot(raw) : raw;
       if (data.type === 'welcome') {
+        if (data.protocol !== PROTOCOL || data.simulation !== SIMULATION_VERSION) {
+          this.closed = true; this.emit('error', 'The server is updating. Refresh the page in a moment.'); this.socket.close(); return;
+        }
         this.connected = true; this.retry = 0; this.id = data.id;
         try { localStorage.setItem('mountain-drift-player-token-v1', data.token); } catch {}
         this.emit('connected', data); this.pingServer();
