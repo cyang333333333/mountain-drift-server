@@ -1,2 +1,2 @@
 // Generated from shared simulation sources.
-export const SIMULATION_VERSION = 'cbd7ace523f5a8d8';
+export const SIMULATION_VERSION = '93b809413b70c4e0';
