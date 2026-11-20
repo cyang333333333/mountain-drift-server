@@ -4,6 +4,18 @@ export { ROAD_HALF } from './road.js';
 export const LAPS = 3;
 export const clamp = (x, min, max) => Math.max(min, Math.min(max, x));
 export const damp = (a, b, rate, dt) => a + (b - a) * (1 - Math.exp(-rate * dt));
+// Tire scrub gently trims up to 9.7 km/h from the cruising ceiling.
+// Approach it over time so steering never snaps the speedometer down.
+export function drivingSpeed(s, input, car, dt) {
+  const ceiling = s.boosting ? car.boostSpeed : car.maxSpeed;
+  const corner = clamp((Math.abs(s.steer) - .05) / .95, 0, 1);
+  const cornerCeiling = ceiling - corner * 2.7;
+  const acceleration = (input.throttle ? car.acceleration : 0) + (s.boosting ? 66 : 0) - (input.brake ? 90.75 : 0);
+  const next = clamp(s.speed + (acceleration - 1.65 - s.speed * .11 - s.speed ** 2 * (.0014 / 1.65) - (s.drift ? 4.95 : 0)) * dt, 0, ceiling);
+  return s.speed > cornerCeiling
+    ? Math.min(next, damp(s.speed, cornerCeiling, 2.4, dt))
+    : Math.min(next, cornerCeiling);
+}
 export function formatTime(seconds) {
   if (!Number.isFinite(seconds) || seconds <= 0) return '--:--.--';
   const cs = Math.floor(seconds * 100);
@@ -35,8 +47,7 @@ export function stepRace(s, input, curvature, length, dt, lateralLimit = ROAD_HA
   s.drift = Boolean(input.drift && Math.abs(s.steer) > .12 && s.speed > 10);
   s.boosting = Boolean(input.boost && !input.brake && s.speed > 3 && s.boost > 1);
   s.boost = clamp(s.boost + (s.boosting ? -28 : s.drift ? 17 : 5) * dt, 0, 100);
-  const acceleration = (input.throttle ? car.acceleration : 0) + (s.boosting ? 66 : 0) - (input.brake ? 90.75 : 0);
-  s.speed = clamp(s.speed + (acceleration - 1.65 - s.speed * .11 - s.speed * s.speed * (.0014 / 1.65) - (s.drift ? 4.95 : 0)) * dt, 0, s.boosting ? car.boostSpeed : car.maxSpeed);
+  s.speed = drivingSpeed(s, input, car, dt);
   const turn = s.steer * car.turn * clamp(s.speed / 16, 0, 1) * (s.drift ? car.driftTurn : 1);
   s.heading = clamp(s.heading + (turn - curvature * s.speed - s.heading * (s.drift ? .45 : car.grip)) * dt, -1.12, 1.12);
   s.lateral += Math.sin(s.heading) * s.speed * dt;

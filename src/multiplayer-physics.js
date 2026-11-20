@@ -1,5 +1,5 @@
 import { getCar } from './catalog.js';
-import { clamp, damp } from './race.js';
+import { clamp, damp, drivingSpeed } from './race.js';
 import { GRID_LATERALS, roadBodyLimit } from './road.js';
 
 export const FIXED_DT = 1 / 120;
@@ -36,8 +36,7 @@ export function stepDriver(s, rawInput, track, dt = FIXED_DT) {
   s.boosting = input.boost && !input.brake && s.speed > 3 && s.boost > 1;
   s.braking = input.brake;
   s.boost = clamp(s.boost + (s.boosting ? -28 : s.drift ? 17 : 5) * dt, 0, 100);
-  const acceleration = (input.throttle ? car.acceleration : 0) + (s.boosting ? 66 : 0) - (input.brake ? 90.75 : 0);
-  s.speed = clamp(s.speed + (acceleration - 1.65 - s.speed * .11 - s.speed ** 2 * (.0014 / 1.65) - (s.drift ? 4.95 : 0)) * dt, 0, s.boosting ? car.boostSpeed : car.maxSpeed);
+  s.speed = drivingSpeed(s, input, car, dt);
   const turn = s.steer * car.turn * clamp(s.speed / 16, 0, 1) * (s.drift ? car.driftTurn : 1);
   s.heading += (turn - road.curvature * s.speed - s.heading * (s.drift ? .45 : car.grip) + s.yaw) * dt;
   // Preserve spins while letting grip gently bring the car back toward the road.
