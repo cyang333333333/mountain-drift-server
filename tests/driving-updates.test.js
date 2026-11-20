@@ -13,7 +13,8 @@ for (const car of CARS) test(`${car.shortName}: faster pace and boost match in s
   const single = freshRace(car.id), multi = newDriver(car.id);
   const track = { length: 100000, sample: () => ({ curvature: 0 }) };
   for (let i = 0; i < 1200; i++) { stepRace(single, throttle, 0, track.length, FIXED_DT); stepDriver(multi, throttle, track); }
-  assert.ok(single.speed > 78, 'all cars exceed the old fastest unboosted speed by 30%');
+  const prior = { apex: 88, rally: 82, viper: 98 }[car.id];
+  assert.ok(Math.abs(single.speed / prior - 1.8) < .00001, 'straight-line speed is 80% higher than the previous update');
   assert.ok(Math.abs(single.speed - multi.speed) < 1e-9);
   for (let i = 0; i < 180; i++) { stepRace(single, { ...throttle, boost: true }, 0, track.length, FIXED_DT); stepDriver(multi, { ...throttle, boost: true }, track); }
   assert.ok(single.speed > car.maxSpeed);
