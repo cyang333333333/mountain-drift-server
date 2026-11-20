@@ -112,35 +112,40 @@ export class MultiplayerConnection extends EventTarget {
     this.pending.push(command); if (this.pending.length > 120) this.pending.shift();
     return true;
   }
-  predictAt(track, requestedTick) {
+  predictAt(track, requestedTick, all = false) {
     const snapshot = this.snapshots.at(-1), self = snapshot?.players.find(p => p.id === this.id);
-    if (!self) return this.authoritative ? clone(this.authoritative) : null;
-    if (snapshot.phase !== 'racing' || self.state.finished) return clone(self.state);
+    if (!self) return this.authoritative ? (all ? new Map([[this.id, clone(this.authoritative)]]) : clone(this.authoritative)) : null;
+    if (snapshot.phase !== 'racing' || self.state.finished) return all ? new Map(snapshot.players.map(p => [p.id, clone(p.state)])) : clone(self.state);
     const target = clamp(requestedTick, snapshot.tick, snapshot.tick + 60), end = Math.ceil(target);
     const players = (snapshot.collisions ? snapshot.players : [self]).map(p => ({ id: p.id, state: clone(p.state), input: p.input || EMPTY_INPUT, commands: p.id === this.id ? this.pending : (p.commands || []), commandIndex: 0 }));
     const own = players.find(p => p.id === this.id); let prior;
     for (let tick = snapshot.tick + 1; tick <= end; tick++) {
       for (const p of players) while (p.commandIndex < p.commands.length && p.commands[p.commandIndex].tick <= tick) p.input = p.commands[p.commandIndex++].input;
-      if (tick === end) prior = clone(own.state);
+      if (tick === end) prior = new Map(players.map(p => [p.id, clone(p.state)]));
       const time = snapshot.startAt + tick * TICK_MS;
       stepRaceDrivers(players, track, time, snapshot.collisions);
     }
     if (prior && target < end) {
       const alpha = target - Math.floor(target);
-      for (const key of ['distance','lateral','speed','steer']) own.state[key] = prior[key] + (own.state[key] - prior[key]) * alpha;
-      own.state.heading = prior.heading + angleDifference(own.state.heading, prior.heading) * alpha;
+      for (const p of players) {
+        const before = prior.get(p.id);
+        for (const key of ['distance','lateral','speed','steer']) p.state[key] = before[key] + (p.state[key] - before[key]) * alpha;
+        p.state.heading = before.heading + angleDifference(p.state.heading, before.heading) * alpha;
+      }
     }
-    return own.state;
+    return all ? new Map(players.map(p => [p.id, p.state])) : own.state;
   }
-  predicted(track) {
+  predicted(track, all = false) {
     this.track = track;
     const snapshot = this.snapshots.at(-1); if (!snapshot) return null;
     const tick = clamp((this.now() + this.lead - snapshot.startAt) / TICK_MS, snapshot.tick, snapshot.tick + 60);
     this.lastPredictionTick = Math.max(this.lastPredictionTick ?? tick, tick);
-    return this.predictAt(track, this.lastPredictionTick);
+    return this.predictAt(track, this.lastPredictionTick, all);
   }
   visualState(track, elapsed) {
-    const state = this.predicted(track); if (!state) return null;
+    this.contactPlayers = this.predicted(track, true);
+    const state = this.contactPlayers?.get(this.id); if (!state) return null;
+    this.visualCorrection = { ...this.correction };
     const decay = Math.exp(-12 * Math.min(elapsed, .25));
     for (const key of Object.keys(this.correction)) { state[key] += this.correction[key]; this.correction[key] *= decay; }
     return state;
@@ -177,6 +182,21 @@ export class MultiplayerConnection extends EventTarget {
       state.heading = first.state.heading + angleDifference(last.state.heading, first.state.heading) * alpha;
     }
     return state;
+  }
+  contactVisual(id, remote, own, track) {
+    const predicted = this.contactPlayers?.get(id);
+    if (!remote || !predicted || own.finished || predicted.finished || !this.snapshots.at(-1)?.collisions) return remote;
+    const delta = predicted.distance - own.distance;
+    const gap = Math.hypot(delta - Math.round(delta / track.length) * track.length, predicted.lateral - own.lateral);
+    const weight = clamp((80 - gap) / 40, 0, 1);
+    if (!weight) return remote;
+    const result = { ...predicted };
+    for (const key of ['distance','lateral','speed','steer']) result[key] = remote[key] + (predicted[key] - remote[key]) * weight;
+    result.heading = remote.heading + angleDifference(predicted.heading, remote.heading) * weight;
+    // Apply the same visual correction to the nearby field, preserving contact.
+    result.distance += (this.visualCorrection?.distance || 0) * weight;
+    result.lateral += (this.visualCorrection?.lateral || 0) * weight;
+    return result;
   }
   diagnostics() {
     const values = [...this.corrections].sort((a,b) => a-b);

@@ -84,3 +84,20 @@ test('snapshot packing keeps prediction fields and cuts full-room payload by at 
   assert.ok(JSON.stringify(packed).length<JSON.stringify(original).length*.6);
   for(let i=0;i<12;i++)for(const key of ['distance','lapTimes','finished','carId','ghostUntil','hitSerial'])assert.deepEqual(decoded.players[i].state[key],original.players[i].state[key]);
 });
+
+test('nearby opponents render at the collision prediction time instead of behind their physical bodies', async () => {
+  const h = await fixture(true);
+  Object.assign(h.a.state, { distance: 20, speed: 70, lateral: 0 });
+  Object.assign(h.b.state, { distance: 32, speed: 20, lateral: 0 });
+  h.c.acceptSnapshot(h.service.snapshot(h.room));
+  h.c.correction.distance = 1;
+  const own = h.c.visualState(h.track, 1 / 60), predicted = h.c.contactPlayers.get(h.b.id);
+  const remote = { ...predicted, distance: predicted.distance - 8 };
+  const shown = h.c.contactVisual(h.b.id, remote, own, h.track);
+  assert.ok(Math.abs(shown.distance - predicted.distance - h.c.visualCorrection.distance) < .00001);
+  assert.equal(shown.lateral, predicted.lateral);
+  assert.ok(shown.distance > remote.distance + 7, 'visible opponent follows contact time rather than delayed interpolation');
+  const far = { ...predicted, distance: own.distance + 200 };
+  h.c.contactPlayers.set(h.b.id, far);
+  assert.equal(h.c.contactVisual(h.b.id, remote, own, h.track), remote, 'distant cars retain buffered interpolation');
+});

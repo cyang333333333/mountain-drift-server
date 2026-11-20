@@ -48,12 +48,12 @@ export function createTrack(trackId = 'alpine-pass-v1') {
     const hills = config.theme === 'volcano'
       ? 5 + rough * 1.1 + Math.sin(x * .012 + .6) * Math.cos(z * .014) * 15
       : 19 + rough * 1.5 + Math.sin(x * .009) * Math.cos(z * .011) * 25;
-    const mix = THREE.MathUtils.smoothstep(near.distance, VERGE_HALF + 7, VERGE_HALF + 45);
+    const mix = THREE.MathUtils.smoothstep(near.distance, VERGE_HALF + 18, VERGE_HALF + 45);
     let height = THREE.MathUtils.lerp(near.height - 1.2, hills, mix);
     if (config.theme === 'volcano') {
       // Road clearance is measured against the entire circuit, including bends.
       const canyon = zoneWeight(near.progress, .015, .245);
-      height += canyon * 39 * THREE.MathUtils.smoothstep(near.distance, VERGE_HALF + 7, VERGE_HALF + 25) * (1 - THREE.MathUtils.smoothstep(near.distance, VERGE_HALF + 50, VERGE_HALF + 100));
+      height += canyon * 39 * THREE.MathUtils.smoothstep(near.distance, VERGE_HALF + 18, VERGE_HALF + 25) * (1 - THREE.MathUtils.smoothstep(near.distance, VERGE_HALF + 50, VERGE_HALF + 100));
       const crossing = zoneWeight(near.progress, .49, .735);
       height = THREE.MathUtils.lerp(height, -9 + rough * .3, crossing);
       const climb = zoneWeight(near.progress, .245, .455);
@@ -61,6 +61,15 @@ export function createTrack(trackId = 'alpine-pass-v1') {
     }
     return height;
   }
-  return { ...config, curve, length, points, sample, nearest, terrainHeight };
+  function sceneryHeight(x, z, height) {
+    const near = nearest(x, z);
+    // The margin also clears the triangles between mountain vertices.
+    const blend = THREE.MathUtils.smoothstep(near.distance, VERGE_HALF + 30, VERGE_HALF + 75);
+    return Math.min(height, THREE.MathUtils.lerp(near.height - 3, height, blend));
+  }
+  function sceneryFits(x, z, radius) {
+    return nearest(x, z).distance > VERGE_HALF + radius + 8;
+  }
+  return { ...config, curve, length, points, sample, nearest, terrainHeight, sceneryHeight, sceneryFits };
 }
 

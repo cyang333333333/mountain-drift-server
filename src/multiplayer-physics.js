@@ -36,8 +36,8 @@ export function stepDriver(s, rawInput, track, dt = FIXED_DT) {
   s.boosting = input.boost && !input.brake && s.speed > 3 && s.boost > 1;
   s.braking = input.brake;
   s.boost = clamp(s.boost + (s.boosting ? -28 : s.drift ? 17 : 5) * dt, 0, 100);
-  const acceleration = (input.throttle ? car.acceleration : 0) + (s.boosting ? 25 : 0) - (input.brake ? 34 : 0);
-  s.speed = clamp(s.speed + (acceleration - 1 - s.speed * .11 - s.speed ** 2 * .0018 - (s.drift ? 3 : 0)) * dt, 0, s.boosting ? car.boostSpeed : car.maxSpeed);
+  const acceleration = (input.throttle ? car.acceleration : 0) + (s.boosting ? 40 : 0) - (input.brake ? 55 : 0);
+  s.speed = clamp(s.speed + (acceleration - 1 - s.speed * .11 - s.speed ** 2 * .0014 - (s.drift ? 3 : 0)) * dt, 0, s.boosting ? car.boostSpeed : car.maxSpeed);
   const turn = s.steer * car.turn * clamp(s.speed / 16, 0, 1) * (s.drift ? car.driftTurn : 1);
   s.heading += (turn - road.curvature * s.speed - s.heading * (s.drift ? .45 : car.grip) + s.yaw) * dt;
   // Preserve spins while letting grip gently bring the car back toward the road.
@@ -56,42 +56,59 @@ export function stepDriver(s, rawInput, track, dt = FIXED_DT) {
   s.wrongWay = Math.cos(s.heading) < -.15 && s.speed > 3;
 }
 
-function axes(s) { return [{ x: Math.cos(s.heading), z: -Math.sin(s.heading) }, { x: Math.sin(s.heading), z: Math.cos(s.heading) }]; }
-function radius(s, axis) {
-  const b = BODY[s.carId], [side, forward] = axes(s);
-  return Math.abs(side.x * axis.x + side.z * axis.z) * b.width / 2 + Math.abs(forward.x * axis.x + forward.z * axis.z) * b.length / 2;
+const CONTACT_SKIN = .08;
+function axes(s, rotation = 0) { const h = s.heading + rotation; return [{ x: Math.cos(h), z: -Math.sin(h) }, { x: Math.sin(h), z: Math.cos(h) }]; }
+function rotate(v, angle) { return { x: v.x * Math.cos(angle) + v.z * Math.sin(angle), z: -v.x * Math.sin(angle) + v.z * Math.cos(angle) }; }
+function radius(s, axis, rotation) {
+  const b = BODY[s.carId], [side, forward] = axes(s, rotation);
+  return Math.abs(side.x * axis.x + side.z * axis.z) * (b.width / 2 + CONTACT_SKIN) + Math.abs(forward.x * axis.x + forward.z * axis.z) * (b.length / 2 + CONTACT_SKIN);
 }
 function distanceBetween(a, b, length) { const delta = b.distance - a.distance; return delta - Math.round(delta / length) * length; }
-export function contact(a, b, length) {
-  const delta = { x: b.lateral - a.lateral, z: distanceBetween(a, b, length) };
-  if (Math.abs(delta.z) > 17 || Math.abs(delta.x) > 15) return null;
+export function contact(a, b, length, track) {
+  const gap = distanceBetween(a, b, length);
+  if (Math.abs(gap) > 35 || Math.abs(b.lateral - a.lateral) > 20) return null;
+  let delta = { x: b.lateral - a.lateral, z: gap }, rotation = 0, scaleA = 1, scaleB = 1;
+  if (track && Number.isFinite(track.sample(a.distance).angle)) {
+    const pa = track.sample(a.distance), pb = track.sample(b.distance);
+    rotation = angleDifference(pb.angle, pa.angle);
+    scaleA = Math.max(.2, 1 - pa.curvature * a.lateral); scaleB = Math.max(.2, 1 - pb.curvature * b.lateral);
+    // Compare the rendered body locations; centerline distance alone is wrong
+    // on inside lanes, where the physical distance is substantially shorter.
+    delta = rotate({ x: pb.x + pb.nx * b.lateral - pa.x - pa.nx * a.lateral, z: pb.z + pb.nz * b.lateral - pa.z - pa.nz * a.lateral }, -pa.angle);
+  }
   let depth = Infinity, normal;
-  for (const axis of [...axes(a), ...axes(b)]) {
+  for (const axis of [...axes(a), ...axes(b, rotation)]) {
     const projection = delta.x * axis.x + delta.z * axis.z;
-    const overlap = radius(a, axis) + radius(b, axis) - Math.abs(projection);
+    const overlap = radius(a, axis, 0) + radius(b, axis, rotation) - Math.abs(projection);
     if (overlap <= 0) return null;
     if (overlap < depth) { depth = overlap; normal = { x: axis.x * (projection >= 0 ? 1 : -1), z: axis.z * (projection >= 0 ? 1 : -1) }; }
   }
-  return { depth, normal, delta };
+  return { depth, normal, delta, rotation, scaleA, scaleB };
 }
-export function resolveContact(a, b, length) {
-  const hit = contact(a, b, length); if (!hit) return 0;
-  const { normal: n, depth, delta } = hit, ba = BODY[a.carId], bb = BODY[b.carId], ia = 1 / ba.mass, ib = 1 / bb.mass;
-  const correction = Math.max(0, depth - .005) / (ia + ib) * .85;
-  a.lateral -= n.x * correction * ia; a.distance -= n.z * correction * ia;
-  b.lateral += n.x * correction * ib; b.distance += n.z * correction * ib;
-  const va = { x: Math.sin(a.heading) * a.speed + a.pushX, z: Math.cos(a.heading) * a.speed + a.pushZ };
-  const vb = { x: Math.sin(b.heading) * b.speed + b.pushX, z: Math.cos(b.heading) * b.speed + b.pushZ };
+export function resolveContact(a, b, length, track) {
+  const hit = contact(a, b, length, track); if (!hit) return 0;
+  const { normal: n, depth, delta, rotation, scaleA, scaleB } = hit, ba = BODY[a.carId], bb = BODY[b.carId], ia = 1 / ba.mass, ib = 1 / bb.mass;
+  const nb = rotate(n, -rotation);
+  const correction = Math.max(0, depth - .001) / (ia + ib);
+  a.lateral -= n.x * correction * ia; a.distance -= n.z * correction * ia / scaleA;
+  b.lateral += nb.x * correction * ib; b.distance += nb.z * correction * ib / scaleB;
+  const va = { x: Math.sin(a.heading) * a.speed + a.pushX, z: (Math.cos(a.heading) * a.speed + a.pushZ) * scaleA };
+  const vb = rotate({ x: Math.sin(b.heading) * b.speed + b.pushX, z: (Math.cos(b.heading) * b.speed + b.pushZ) * scaleB }, rotation);
   const relative = (vb.x - va.x) * n.x + (vb.z - va.z) * n.z;
   if (relative >= 0) return 0;
   // Contact point offset supplies angular momentum for glancing impacts.
-  const ra = { x: clamp(delta.x / 2, -ba.width / 2, ba.width / 2), z: clamp(delta.z / 2, -ba.length / 2, ba.length / 2) };
-  const rb = { x: -ra.x, z: -ra.z };
+  const offset = (state, body, rotation, sign) => {
+    const [side, forward] = axes(state, rotation);
+    const x = clamp(sign * (delta.x * side.x + delta.z * side.z) / 2, -body.width / 2, body.width / 2);
+    const z = clamp(sign * (delta.x * forward.x + delta.z * forward.z) / 2, -body.length / 2, body.length / 2);
+    return { x: side.x * x + forward.x * z, z: side.z * x + forward.z * z };
+  };
+  const ra = offset(a, ba, 0, 1), rb = offset(b, bb, rotation, -1);
   const ca = ra.z * n.x - ra.x * n.z, cb = rb.z * n.x - rb.x * n.z;
   const inertiaA = ba.mass * (ba.width ** 2 + ba.length ** 2) / 12, inertiaB = bb.mass * (bb.width ** 2 + bb.length ** 2) / 12;
-  const impulse = -(1.12 * relative) / (ia + ib + ca ** 2 / inertiaA + cb ** 2 / inertiaB);
-  a.pushX -= impulse * n.x * ia; a.pushZ -= impulse * n.z * ia;
-  b.pushX += impulse * n.x * ib; b.pushZ += impulse * n.z * ib;
+  const impulse = -(1.38 * relative) / (ia + ib + ca ** 2 / inertiaA + cb ** 2 / inertiaB);
+  a.pushX -= impulse * n.x * ia; a.pushZ -= impulse * n.z * ia / scaleA;
+  b.pushX += impulse * nb.x * ib; b.pushZ += impulse * nb.z * ib / scaleB;
   a.yaw = clamp(a.yaw - ca * impulse / inertiaA, -5, 5); b.yaw = clamp(b.yaw + cb * impulse / inertiaB, -5, 5);
   if (-relative > 1.5 && !a.hit) impact(a, -relative);
   if (-relative > 1.5 && !b.hit) impact(b, -relative);
@@ -100,13 +117,13 @@ export function resolveContact(a, b, length) {
 // Identical fixed-step ordering for authoritative racing and client prediction.
 export function stepRaceDrivers(players, track, time, collisions, onImpact) {
   for (const p of players) if (p.state.ghostUntil > 0 && p.state.ghostUntil <= time) {
-    p.state.ghostUntil = collisions && players.some(other => other !== p && !other.state.finished && contact(p.state, other.state, track.length)) ? time + 200 : 0;
+    p.state.ghostUntil = collisions && players.some(other => other !== p && !other.state.finished && contact(p.state, other.state, track.length, track)) ? time + 200 : 0;
   }
   for (const p of players) if (!p.state.finished) stepDriver(p.state, p.input, track);
-  if (collisions) for (let i = 0; i < players.length; i++) for (let j = i + 1; j < players.length; j++) {
+  if (collisions) for (let iteration = 0; iteration < 3; iteration++) for (let i = 0; i < players.length; i++) for (let j = i + 1; j < players.length; j++) {
     const a = players[i].state, b = players[j].state;
     if (a.finished || b.finished || a.ghostUntil > time || b.ghostUntil > time) continue;
-    const force = resolveContact(a, b, track.length);
+    const force = resolveContact(a, b, track.length, track);
     if (force > 2) onImpact?.(i, j, force);
   }
 }
@@ -117,7 +134,7 @@ export function stepDrivers(players, track, elapsed, time, collisions) {
     if (collisions) for (let iteration = 0; iteration < 3; iteration++) {
       for (let a = 0; a < players.length; a++) for (let b = a + 1; b < players.length; b++) {
         const x = players[a].state, y = players[b].state;
-        if (!x.finished && !y.finished && time >= x.ghostUntil && time >= y.ghostUntil) resolveContact(x, y, track.length);
+        if (!x.finished && !y.finished && time >= x.ghostUntil && time >= y.ghostUntil) resolveContact(x, y, track.length, track);
       }
     }
   }
